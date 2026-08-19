@@ -1,0 +1,497 @@
+Yes. For the **Arduino + 5 IR sensor + L298N line follower** we were discussing, I’d use a **5-sensor weighted-position PID** rather than a simple left-vs-right calculation. This gives a smoother error value and better cornering. Weighted averages are a common approach for PID line followers. ([GitHub][1])
+
+Assuming your sensors are arranged:
+
+`LEFT ← S1 S2 S3 S4 S5 → RIGHT`
+
+the position weights are:
+
+`0   1000   2000   3000   4000`
+
+so the center is **2000**.
+
+### Full Arduino code
+
+```cpp
+/*
+   5-SENSOR PID LINE FOLLOWER
+   Arduino UNO + L298N + 5 IR sensors
+
+   Sensor arrangement:
+
+   LEFT                         RIGHT
+    S1     S2     S3     S4     S5
+    |      |      |      |      |
+    A0     A1     A2     A3     A4
+
+   Position:
+    0     1000   2000   3000   4000
+
+   Center = 2000
+*/
+
+
+// ======================================================
+// SENSOR PINS
+// ======================================================
+
+const int sensorPins[5] = {
+  A0, A1, A2, A3, A4
+};
+
+
+// ======================================================
+// L298N MOTOR DRIVER PINS
+// ======================================================
+
+// LEFT MOTOR
+const int ENA = 5;     // PWM
+const int IN1 = 7;
+const int IN2 = 8;
+
+// RIGHT MOTOR
+const int ENB = 6;     // PWM
+const int IN3 = 9;
+const int IN4 = 10;
+
+
+// ======================================================
+// PID SETTINGS
+// ======================================================
+
+// Start with these values.
+// You WILL need to tune them for your robot.
+
+float Kp = 0.08;
+float Ki = 0.0000;
+float Kd = 0.80;
+
+
+// ======================================================
+// MOTOR SETTINGS
+// ======================================================
+
+int baseSpeed = 130;
+
+int maxSpeed = 255;
+int minSpeed = 0;
+
+
+// ======================================================
+// PID VARIABLES
+// ======================================================
+
+float error = 0;
+float previousError = 0;
+
+float integral = 0;
+float derivative = 0;
+
+float correction = 0;
+
+
+// ======================================================
+// LINE SETTINGS
+// ======================================================
+
+// Change this if your IR sensors work opposite.
+//
+// true  = BLACK line gives HIGH reading
+// false = BLACK line gives LOW reading
+//
+// Most simple digital IR modules need special handling,
+// so for analog sensors we convert the reading below.
+
+bool blackLine = true;
+
+
+// ======================================================
+// SETUP
+// ======================================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  // Motor pins
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+
+  pinMode(ENB, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  // Sensor pins
+  for (int i = 0; i < 5; i++) {
+    pinMode(sensorPins[i], INPUT);
+  }
+
+  // Stop motors initially
+  stopMotors();
+
+  delay(2000);
+
+  Serial.println("PID Line Follower Started");
+}
+
+
+// ======================================================
+// MAIN LOOP
+// ======================================================
+
+void loop() {
+
+  // ----------------------------------------------------
+  // 1. READ LINE POSITION
+  // ----------------------------------------------------
+
+  int position = readLinePosition();
+
+
+  // ----------------------------------------------------
+  // 2. CALCULATE ERROR
+  // ----------------------------------------------------
+
+  // Center position = 2000
+
+  error = position - 2000;
+
+
+  // ----------------------------------------------------
+  // 3. PID
+  // ----------------------------------------------------
+
+  // Proportional
+  float P = error;
+
+
+  // Integral
+  integral += error;
+
+  // Anti-windup
+  if (integral > 5000)
+    integral = 5000;
+
+  if (integral < -5000)
+    integral = -5000;
+
+
+  // Derivative
+  derivative = error - previousError;
+
+
+  // PID correction
+  correction =
+      (Kp * P) +
+      (Ki * integral) +
+      (Kd * derivative);
+
+
+  // Save error
+  previousError = error;
+
+
+  // ----------------------------------------------------
+  // 4. MOTOR SPEED
+  // ----------------------------------------------------
+
+  int leftSpeed;
+  int rightSpeed;
+
+
+  /*
+     If error is positive:
+
+     Line is towards RIGHT.
+
+     Slow down RIGHT / speed up LEFT
+     so the robot turns RIGHT.
+  */
+
+  leftSpeed  = baseSpeed + correction;
+  rightSpeed = baseSpeed - correction;
+
+
+  // ----------------------------------------------------
+  // 5. LIMIT SPEED
+  // ----------------------------------------------------
+
+  leftSpeed = constrain(leftSpeed, minSpeed, maxSpeed);
+  rightSpeed = constrain(rightSpeed, minSpeed, maxSpeed);
+
+
+  // ----------------------------------------------------
+  // 6. DRIVE MOTORS
+  // ----------------------------------------------------
+
+  driveMotors(leftSpeed, rightSpeed);
+
+
+  // ----------------------------------------------------
+  // DEBUG
+  // ----------------------------------------------------
+
+  Serial.print("Position: ");
+  Serial.print(position);
+
+  Serial.print("  Error: ");
+  Serial.print(error);
+
+  Serial.print("  P: ");
+  Serial.print(P);
+
+  Serial.print("  I: ");
+  Serial.print(integral);
+
+  Serial.print("  D: ");
+  Serial.print(derivative);
+
+  Serial.print("  Correction: ");
+  Serial.print(correction);
+
+  Serial.print("  L: ");
+  Serial.print(leftSpeed);
+
+  Serial.print("  R: ");
+  Serial.println(rightSpeed);
+
+
+  // Small delay
+  delay(5);
+}
+
+
+// ======================================================
+// READ LINE POSITION
+// ======================================================
+
+int readLinePosition() {
+
+  long weightedSum = 0;
+  long sensorSum = 0;
+
+
+  for (int i = 0; i < 5; i++) {
+
+    int raw = analogRead(sensorPins[i]);
+
+
+    /*
+       Convert sensor reading so:
+
+       WHITE = approximately 0
+       BLACK = approximately high
+
+       If your sensor behaves opposite, change this.
+    */
+
+    int value;
+
+    if (blackLine) {
+
+      // For sensors where BLACK produces lower reading
+      value = 1023 - raw;
+
+    } else {
+
+      value = raw;
+    }
+
+
+    // Ignore tiny noise
+    if (value < 50) {
+      value = 0;
+    }
+
+
+    // Position weights
+    int weight = i * 1000;
+
+
+    weightedSum += (long)value * weight;
+    sensorSum += value;
+  }
+
+
+  // ----------------------------------------------------
+  // LINE LOST
+  // ----------------------------------------------------
+
+  if (sensorSum == 0) {
+
+    /*
+       If line disappears, keep using the
+       previous direction.
+
+       This prevents the robot from immediately
+       driving straight off the track.
+    */
+
+    if (previousError < 0) {
+      return 0;
+    } else {
+      return 4000;
+    }
+  }
+
+
+  // ----------------------------------------------------
+  // WEIGHTED AVERAGE
+  // ----------------------------------------------------
+
+  int position = weightedSum / sensorSum;
+
+
+  return position;
+}
+
+
+// ======================================================
+// MOTOR CONTROL
+// ======================================================
+
+void driveMotors(int leftSpeed, int rightSpeed) {
+
+  // ----------------------------------------------------
+  // LEFT MOTOR FORWARD
+  // ----------------------------------------------------
+
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+
+  analogWrite(ENA, leftSpeed);
+
+
+  // ----------------------------------------------------
+  // RIGHT MOTOR FORWARD
+  // ----------------------------------------------------
+
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+
+  analogWrite(ENB, rightSpeed);
+}
+
+
+// ======================================================
+// STOP MOTORS
+// ======================================================
+
+void stopMotors() {
+
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
+```
+
+### How the sensor-position calculation works
+
+Suppose the five sensors give approximately:
+
+```text
+S1 = 0
+S2 = 200
+S3 = 800
+S4 = 200
+S5 = 0
+```
+
+The calculation is:
+
+[
+Position =
+\frac{
+S1(0)+S2(1000)+S3(2000)+S4(3000)+S5(4000)
+}{
+S1+S2+S3+S4+S5
+}
+]
+
+So:
+
+[
+Position =
+\frac{0+200000+1600000+600000+0}{1200}
+]
+
+[
+Position \approx 2000
+]
+
+Therefore:
+
+```text
+Position = 2000
+Error = Position - 2000
+Error = 0
+```
+
+The robot is centered, so PID produces almost no correction.
+
+This weighted-average method gives fractional/smooth positions instead of simply saying "sensor 2" or "sensor 3," which makes steering smoother. ([GitHub][1])
+
+### Example: line moves right
+
+Suppose:
+
+```text
+S1 = 0
+S2 = 0
+S3 = 300
+S4 = 800
+S5 = 200
+```
+
+The calculated position becomes somewhere around **2800–3000**.
+
+Therefore:
+
+```text
+Error = 2900 - 2000
+Error = +900
+```
+
+PID sees a positive error and changes the motor speeds:
+
+```text
+LEFT  = 130 + correction
+RIGHT = 130 - correction
+```
+
+The left motor becomes faster and the right motor slower, causing the robot to turn toward the right.
+
+The basic PID calculation is:
+
+[
+\boxed{Correction=K_pE+K_i\sum E+K_d(E-E_{previous})}
+]
+
+which is the same structure used in typical Arduino PID line-following implementations. ([Arduino Project Hub][2])
+
+### ⚠️ One important thing
+
+The **exact `Kp`, `Ki`, and `Kd` values cannot be copied universally**. They depend on your sensor spacing, motors, wheel size, robot weight, battery voltage, and track. PID gains are normally tuned experimentally. ([GitHub][1])
+
+For your first test, I'd use:
+
+```cpp
+Kp = 0.08;
+Ki = 0.0000;
+Kd = 0.80;
+
+baseSpeed = 130;
+```
+
+**Don't tune `Ki` yet.** Start with PD. Once it follows the line reliably, we can tune `Kp` and `Kd`, then add a tiny `Ki` only if the robot has a persistent offset.
+
+If your robot is the **same one from our previous parts list**, with the **5 IR sensors + Arduino + L298N + two TT gear motors**, this code is the version I'd start with.
+
+[1]: https://github.com/kqw8/arduino-pid-line-follower/blob/main/README.md?utm_source=chatgpt.com "arduino-pid-line-follower/README.md at main · kqw8/arduino-pid-line-follower · GitHub"
+[2]: https://projecthub.arduino.cc/anova9347/01813f24-6fd7-4cea-b43b-3c0b78bcab16?offset=0&utm_source=chatgpt.com "Line Follower Robot (with PID controller) | Arduino Project Hub"
